@@ -1,3 +1,4 @@
+import os
 import logging
 from settings import APP_BAR_TITLE
 from core.utils.win32.windows import WinEvent
@@ -5,11 +6,22 @@ from core.widgets.base import BaseWidget
 from core.event_service import EventService
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import QLabel
+from PyQt6.QtGui import QPixmap, QImage
 from core.validation.widgets.yasb.active_window import VALIDATION_SCHEMA
 from core.utils.win32.utilities import get_hwnd_info
+from PIL import Image
+import win32gui
+import win32ui
+import win32con
+from core.utils.win32.uwp import get_package
+import xml.etree.ElementTree as ET
+from pathlib import Path
 
-IGNORED_TITLES = ['', ' ','FolderView', 'Program Manager', 'python3', 'pythonw3', 'YasbBar']
-IGNORED_CLASSES = ['WorkerW','TopLevelWindowForOverflowXamlIsland', 'Shell_TrayWnd', 'Shell_SecondaryTrayWnd']
+pil_logger = logging.getLogger('PIL')
+pil_logger.setLevel(logging.INFO)
+
+IGNORED_TITLES = ['', ' ', 'FolderView', 'Program Manager', 'python3', 'pythonw3', 'YasbBar']
+IGNORED_CLASSES = ['WorkerW', 'TopLevelWindowForOverflowXamlIsland', 'Shell_TrayWnd', 'Shell_SecondaryTrayWnd']
 IGNORED_PROCESSES = ['SearchHost.exe', 'komorebi.exe']
 IGNORED_YASB_TITLES = [APP_BAR_TITLE]
 IGNORED_YASB_CLASSES = [
@@ -24,6 +36,92 @@ try:
 except ImportError:
     SystemEventListener = None
     logging.warning("Failed to load Win32 System Event Listener")
+
+
+def get_window_icon(hwnd):
+    """Fetch the icon of the window."""
+    try:
+        hicon = win32gui.SendMessage(hwnd, win32con.WM_GETICON, win32con.ICON_SMALL, 0)
+        if hicon == 0:
+            hicon = win32gui.SendMessage(hwnd, win32con.WM_GETICON, win32con.ICON_BIG, 0)
+        if hicon == 0:
+            hicon = win32gui.GetClassLong(hwnd, win32con.GCL_HICON)
+
+        if hicon:
+            hdc = win32ui.CreateDCFromHandle(win32gui.GetDC(0))
+            hbmp = win32ui.CreateBitmap()
+            hbmp.CreateCompatibleBitmap(hdc, 32, 32)
+            hdc = hdc.CreateCompatibleDC()
+            hdc.SelectObject(hbmp)
+            hdc.DrawIcon((0, 0), hicon)
+
+            bmpinfo = hbmp.GetInfo()
+            bmpstr = hbmp.GetBitmapBits(True)
+            img = Image.frombuffer(
+                'RGBA',
+                (bmpinfo['bmWidth'], bmpinfo['bmHeight']),
+                bmpstr, 'raw', 'BGRA', 0, 1
+            )
+            return img
+        else:
+            import win32api
+            import ctypes
+            import ctypes.wintypes
+            import win32process
+            try:
+                class_name = win32gui.GetClassName(hwnd)
+            except:
+                return None
+            actual_hwnd = 1
+
+            def cb(hwnd, b):
+                nonlocal actual_hwnd
+                try:
+                    class_name = win32gui.GetClassName(hwnd)
+                except:
+                    class_name = ""
+                if "ApplicationFrame" in class_name:
+                    return True
+                actual_hwnd = hwnd
+                return False
+
+            if class_name == "ApplicationFrameWindow":
+                win32gui.EnumChildWindows(hwnd, cb, False)
+            else:
+                actual_hwnd = hwnd
+
+            package = get_package(actual_hwnd)
+            if package is None:
+                return None
+            if package.package_path is None:
+                return None
+            manifest_path = os.path.join(package.package_path, "AppXManifest.xml")
+            if not os.path.exists(manifest_path):
+                return None
+            root = ET.parse(manifest_path)
+            velement = root.find(".//VisualElements")
+            if velement is None:
+                velement = root.find(".//{http://schemas.microsoft.com/appx/manifest/uap/windows10}VisualElements")
+            if not velement:
+                return None
+            if "Square44x44Logo" not in velement.attrib:
+                return None
+            logopath = Path(package.package_path) / (velement.attrib["Square44x44Logo"])
+            if not logopath.exists():
+                logopath = logopath.with_suffix(".targetsize-256_altform-unplated" + logopath.suffix)
+            if not logopath.exists():
+                logopath = logopath.with_suffix(".targetsize-256" + logopath.suffix)
+            if not logopath.exists():
+                return None
+            img = Image.open(logopath)
+            if not img:
+                return None
+            return img
+    except Exception as e:
+        logging.exception("")
+        print(f"Error fetching icon: {e}")
+        return None
+
 
 
 class ActiveWindowWidget(BaseWidget):
@@ -55,15 +153,21 @@ class ActiveWindowWidget(BaseWidget):
         self._max_length = max_length
         self._max_length_ellipsis = max_length_ellipsis
         self._event_service = EventService()
+ 
+        self._window_icon_label = QLabel()
         self._window_title_text = QLabel()
         self._window_title_text.setProperty("class", "label")
+        self._window_icon_label.setProperty("class", "label icon")
         self._window_title_text.setText(self._label_no_window)
+        self._window_icon_label.setText(self._label_no_window)
 
         self._ignore_window = ignore_window
         self._ignore_window['classes'] += IGNORED_CLASSES
         self._ignore_window['processes'] += IGNORED_PROCESSES
         self._ignore_window['titles'] += IGNORED_TITLES
+        self._icon_cache = dict()
 
+        self.widget_layout.addWidget(self._window_icon_label)
         self.widget_layout.addWidget(self._window_title_text)
         self.register_callback("toggle_label", self._toggle_title_text)
         if not callbacks:
@@ -113,8 +217,23 @@ class ActiveWindowWidget(BaseWidget):
         if self._win_info and hwnd == self._win_info["hwnd"]:
             self._on_focus_change_event(hwnd, event)
 
+
+
     def _update_window_title(self, hwnd: int, win_info: dict, event: WinEvent) -> None:
         try:
+            if hwnd in self._icon_cache:
+                icon_img = self._icon_cache[hwnd]
+            else:
+                icon_img = get_window_icon(hwnd)
+                if icon_img:
+                    icon_img = icon_img.resize((16, 16), Image.LANCZOS).convert("RGBA")
+                    self._icon_cache[hwnd] = icon_img
+            if icon_img:
+                qimage = QImage(icon_img.tobytes(), icon_img.width, icon_img.height, QImage.Format.Format_RGBA8888)
+                self.pixmap = QPixmap.fromImage(qimage)
+            else:
+                self.pixmap = None
+
             title = win_info['title']
             process = win_info['process']
             class_name = win_info['class_name']
@@ -128,7 +247,8 @@ class ActiveWindowWidget(BaseWidget):
                     truncated_title = f"{win_info['title'][:self._max_length]}{self._max_length_ellipsis}"
                     win_info['title'] = truncated_title
                     self._window_title_text.setText(self._label_no_window)
-
+                    self._window_icon_label.setText(self._label_no_window)
+                 
                 self._win_info = win_info
                 self._update_text()
 
@@ -142,5 +262,10 @@ class ActiveWindowWidget(BaseWidget):
     def _update_text(self):
         try:
             self._window_title_text.setText(self._active_label.format(win=self._win_info))
+            if self.pixmap:
+                self._window_icon_label.show()
+                self._window_icon_label.setPixmap(self.pixmap)
+            else:
+                self._window_icon_label.hide()
         except Exception:
             self._window_title_text.setText(self._active_label)
