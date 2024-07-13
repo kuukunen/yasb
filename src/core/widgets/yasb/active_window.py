@@ -4,7 +4,7 @@ from settings import APP_BAR_TITLE
 from core.utils.win32.windows import WinEvent
 from core.widgets.base import BaseWidget
 from core.event_service import EventService
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import pyqtSignal, QTimer
 from PyQt6.QtWidgets import QLabel
 from PyQt6.QtGui import QPixmap, QImage
 from core.validation.widgets.yasb.active_window import VALIDATION_SCHEMA
@@ -187,6 +187,7 @@ class ActiveWindowWidget(BaseWidget):
 
         self.window_name_change.connect(self._on_window_name_change_event)
         self._event_service.register_event(WinEvent.EventObjectNameChange, self.window_name_change)
+        self._event_service.register_event(WinEvent.EventObjectStateChange, self.window_name_change)
 
     def _toggle_title_text(self) -> None:
         self._show_alt = not self._show_alt
@@ -217,26 +218,35 @@ class ActiveWindowWidget(BaseWidget):
         if self._win_info and hwnd == self._win_info["hwnd"]:
             self._on_focus_change_event(hwnd, event)
 
-
-
     def _update_window_title(self, hwnd: int, win_info: dict, event: WinEvent) -> None:
         try:
-            if hwnd in self._icon_cache:
-                icon_img = self._icon_cache[hwnd]
+            if hwnd != win32gui.GetForegroundWindow():
+                return
+            title = win_info['title']
+            process = win_info['process']
+            pid = process["pid"]
+            class_name = win_info['class_name']
+
+            if (hwnd, title, pid) in self._icon_cache:
+                icon_img = self._icon_cache[(hwnd, title, pid)]
             else:
                 icon_img = get_window_icon(hwnd)
                 if icon_img:
                     icon_img = icon_img.resize((16, 16), Image.LANCZOS).convert("RGBA")
-                    self._icon_cache[hwnd] = icon_img
+                else:
+                    # UWP apps might need a moment to start under ApplicationFrameHost
+                    # So we delay the detection, but only do it once.
+                    if event != WinEvent.WinEventOutOfContext and process["name"] == "ApplicationFrameHost.exe":
+                        QTimer.singleShot(500, lambda: self._update_window_title(hwnd, win_info, WinEvent.WinEventOutOfContext))
+                        return
+
+                self._icon_cache[(hwnd, title, pid)] = icon_img
             if icon_img:
                 qimage = QImage(icon_img.tobytes(), icon_img.width, icon_img.height, QImage.Format.Format_RGBA8888)
                 self.pixmap = QPixmap.fromImage(qimage)
             else:
                 self.pixmap = None
 
-            title = win_info['title']
-            process = win_info['process']
-            class_name = win_info['class_name']
 
             if (title.strip() in self._ignore_window['titles'] or
                     class_name in self._ignore_window['classes'] or

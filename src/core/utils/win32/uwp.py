@@ -151,14 +151,14 @@ def package_full_name_from_handle(handle):
     length = ctypes.c_uint()
     ret_val = _get_package_full_name(handle, ctypes.byref(length), None)
     if ret_val == APPMODEL_ERROR_NO_PACKAGE:
-        print(f"package_full_name_from_handle: handle {handle:#x} has no package.")
+        # print(f"package_full_name_from_handle: handle {handle:#x} has no package.")
         return None
 
     full_name = ctypes.create_unicode_buffer(length.value + 1)
     ret_val = _get_package_full_name(handle, ctypes.byref(length), full_name)
     if ret_val != ERROR_SUCCESS:
         err =  ctypes.WinError(ctypes.get_last_error())
-        print(f"package_full_name_from_handle: error -> {str(err)}")
+        # print(f"package_full_name_from_handle: error -> {str(err)}")
         return None
 
     return full_name
@@ -252,8 +252,6 @@ def get_package(hwnd):
     full_name = package_full_name_from_handle(hprocess)
     if not full_name:
         return
-    else:
-        print(full_name.value)
 
     '''
     children = get_children(hwnd)
@@ -300,9 +298,3 @@ def get_windows():
     func = WNDENUMPROC(append_to_collection)
     _enum_windows(func, 0)
     return hwnds
-
-
-if __name__ == "__main__":
-    for hwnd in get_windows():
-        print(hwnd)
-        get_package(hwnd)
