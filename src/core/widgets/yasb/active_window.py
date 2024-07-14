@@ -16,6 +16,9 @@ import win32con
 from core.utils.win32.uwp import get_package
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from glob import glob
+import locale
+import re
 
 pil_logger = logging.getLogger('PIL')
 pil_logger.setLevel(logging.INFO)
@@ -30,6 +33,7 @@ IGNORED_YASB_CLASSES = [
     'Qt662QWindowToolSaveBits',
     'Qt662QWindowToolSaveBits'
 ]
+TARGETSIZE_REGEX = re.compile(r'targetsize-([0-9]+)')
 
 try:
     from core.utils.win32.event_listener import SystemEventListener
@@ -108,14 +112,53 @@ def get_window_icon(hwnd):
                 return None
             if "Square44x44Logo" not in velement.attrib:
                 return None
-            logopath = Path(package.package_path) / (velement.attrib["Square44x44Logo"])
-            if not logopath.exists():
-                logopath = logopath.with_suffix(".targetsize-256_altform-unplated" + logopath.suffix)
-            if not logopath.exists():
-                logopath = logopath.with_suffix(".targetsize-256" + logopath.suffix)
-            if not logopath.exists():
+            package_path = Path(package.package_path)
+            # logopath = Path(package.package_path) / (velement.attrib["Square44x44Logo"])
+            logofile = Path(velement.attrib["Square44x44Logo"])
+            logopattern = str(logofile.parent / '**') + '\\' + str(logofile.stem) + '*' + str(logofile.suffix)
+            logofiles = glob(logopattern, recursive=True, root_dir=package_path)
+            logofiles = [x.lower() for x in logofiles]
+            if len(logofiles) == 0:
                 return None
-            img = Image.open(logopath)
+            def filter_logos(logofiles, qualifiers, values):
+                for qualifier in qualifiers:
+                    for value in values:
+                        filtered_files = list(filter(lambda x: (qualifier + "-" + value in x), logofiles))
+                        if len(filtered_files) > 0:
+                            return filtered_files
+                return logofiles
+
+            langs = []
+            current_lang_code = ctypes.windll.kernel32.GetUserDefaultUILanguage()
+            if current_lang_code in locale.windows_locale:
+                current_lang = locale.windows_locale[current_lang_code].lower().replace('_', '-')
+                current_lang_short = current_lang.split('-', 1)[0]
+                langs += [current_lang, current_lang_short]
+            if "en" not in langs:
+                langs += ["en", "en-us"]
+
+            # filter_logos will try to select only the files matching the qualifier values
+            # if nothing matches, the list is unchanged
+            if langs:
+                logofiles = filter_logos(logofiles, ["lang", "language"], langs)
+            logofiles = filter_logos(logofiles, ["contrast"], ["standard"])
+            logofiles = filter_logos(logofiles, ["alternateform", "altform"], ["unplated"])
+            logofiles = filter_logos(logofiles, ["contrast"], ["standard"])
+            logofiles = filter_logos(logofiles, ["scale"], ["100", "150", "200"])
+
+            # find the one closest to 48, but bigger
+            def target_size_sort(s):
+                m = TARGETSIZE_REGEX.search(s)
+                if m:
+                    size = int(m.group(1))
+                    if size < 48:
+                        return 5000-size
+                    return size - 48
+                return 10000
+
+            logofiles.sort(key=target_size_sort)
+
+            img = Image.open(package_path / logofiles[0])
             if not img:
                 return None
             return img
@@ -155,6 +198,7 @@ class ActiveWindowWidget(BaseWidget):
         self._max_length = max_length
         self._max_length_ellipsis = max_length_ellipsis
         self._event_service = EventService()
+        self._update_retry_count = 0
  
         self._window_icon_label = QLabel()
         self._window_title_text = QLabel()
@@ -228,6 +272,8 @@ class ActiveWindowWidget(BaseWidget):
             process = win_info['process']
             pid = process["pid"]
             class_name = win_info['class_name']
+            if event != WinEvent.WinEventOutOfContext:
+                self._update_retry_count = 0
 
             if (hwnd, title, pid) in self._icon_cache:
                 icon_img = self._icon_cache[(hwnd, title, pid)]
@@ -238,9 +284,13 @@ class ActiveWindowWidget(BaseWidget):
                 else:
                     # UWP apps might need a moment to start under ApplicationFrameHost
                     # So we delay the detection, but only do it once.
-                    if event != WinEvent.WinEventOutOfContext and process["name"] == "ApplicationFrameHost.exe":
-                        QTimer.singleShot(500, lambda: self._update_window_title(hwnd, win_info, WinEvent.WinEventOutOfContext))
-                        return
+                    if process["name"] == "ApplicationFrameHost.exe":
+                        if self._update_retry_count < 10:
+                            self._update_retry_count += 1
+                            QTimer.singleShot(500, lambda: self._update_window_title(hwnd, win_info, WinEvent.WinEventOutOfContext))
+                            return
+                        else:
+                            self._update_retry_count = 0
 
                 if not DEBUG:
                    self._icon_cache[(hwnd, title, pid)] = icon_img
