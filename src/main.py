@@ -1,3 +1,5 @@
+import sys
+from settings import *
 from sys import argv, exit
 from PyQt6.QtWidgets import QApplication
 from core.bar_manager import BarManager
@@ -7,6 +9,9 @@ from core.tray import TrayIcon
 from core.watcher import create_observer
 
 def main():
+    if "--debug" in argv:
+        global DEBUG
+        DEBUG = True
     config, stylesheet = get_config_and_stylesheet()
 
     app = QApplication(argv)

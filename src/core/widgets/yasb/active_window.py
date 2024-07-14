@@ -1,6 +1,6 @@
 import os
 import logging
-from settings import APP_BAR_TITLE
+from settings import APP_BAR_TITLE, DEBUG
 from core.utils.win32.windows import WinEvent
 from core.widgets.base import BaseWidget
 from core.event_service import EventService
@@ -97,6 +97,8 @@ def get_window_icon(hwnd):
                 return None
             manifest_path = os.path.join(package.package_path, "AppXManifest.xml")
             if not os.path.exists(manifest_path):
+                if DEBUG:
+                    print(f"manifest not found {manifest_path}")
                 return None
             root = ET.parse(manifest_path)
             velement = root.find(".//VisualElements")
@@ -240,7 +242,8 @@ class ActiveWindowWidget(BaseWidget):
                         QTimer.singleShot(500, lambda: self._update_window_title(hwnd, win_info, WinEvent.WinEventOutOfContext))
                         return
 
-                self._icon_cache[(hwnd, title, pid)] = icon_img
+                if not DEBUG:
+                   self._icon_cache[(hwnd, title, pid)] = icon_img
             if icon_img:
                 qimage = QImage(icon_img.tobytes(), icon_img.width, icon_img.height, QImage.Format.Format_RGBA8888)
                 self.pixmap = QPixmap.fromImage(qimage)
